@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="340" viewBox="0 0 1000 340" role="img" aria-labelledby="title desc">
+  <title id="title">CloudSphere architecture</title>
+  <desc id="desc">Customer and administrator consoles connect to the Express API, which accesses PostgreSQL. PostgreSQL runs allocation routines and constraints and stores audit and notification records.</desc>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#39c6bd"/></marker></defs>
+  <rect width="1000" height="340" rx="16" fill="#0c2033"/>
+  <g fill="none" stroke="#39c6bd" stroke-width="2.5" marker-end="url(#arrow)">
+    <path d="M225 100H265V170H305"/><path d="M225 240H265V170H305"/>
+    <path d="M485 170H535"/><path d="M715 170H755V100H790"/><path d="M715 170H755V240H790"/>
+  </g>
+  <g fill="#17374d" stroke="#39c6bd" stroke-width="1.5">
+    <rect x="25" y="65" width="200" height="70" rx="10"/><rect x="25" y="205" width="200" height="70" rx="10"/>
+    <rect x="305" y="135" width="180" height="70" rx="10"/><rect x="535" y="135" width="180" height="70" rx="10"/>
+    <rect x="790" y="55" width="185" height="90" rx="10"/><rect x="790" y="195" width="185" height="90" rx="10"/>
+  </g>
+  <g fill="#ffffff" font-family="Arial, sans-serif" font-size="18" text-anchor="middle">
+    <text x="125" y="107">Customer console</text><text x="125" y="247">Admin console</text>
+    <text x="395" y="177">Express API</text><text x="625" y="177">PostgreSQL</text>
+    <text x="882" y="91">Allocation routines</text><text x="882" y="117">and constraints</text>
+    <text x="882" y="231">Audit and</text><text x="882" y="257">notification records</text>
+  </g>
+</svg>

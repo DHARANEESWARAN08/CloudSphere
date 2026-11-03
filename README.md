@@ -74,14 +74,7 @@ A stopped VM retains its CPU/RAM reservation. Termination releases reserved reso
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    Customer[Customer console] --> API[Express API]
-    Admin[Admin console] --> API
-    API --> DB[(PostgreSQL)]
-    DB --> Rules[Allocation routines and constraints]
-    DB --> History[Audit and notification records]
-```
+![CloudSphere architecture: customer and administrator consoles connect to the Express API and PostgreSQL, which enforces allocation rules and stores audit and notification records.](docs/images/architecture.svg)
 
 | Layer | Technologies |
 | --- | --- |
