@@ -1,0 +1,84 @@
+:root {
+  color-scheme: light;
+  --cs-bg: #f7f7f5;
+  --cs-surface: #ffffff;
+  --cs-surface-2: #fafaf8;
+  --cs-border: #e4e4df;
+  --cs-text: #1b1d21;
+  --cs-text-2: #5c6068;
+  --cs-text-3: #8a8e96;
+  --cs-accent: #0f766e;
+  --cs-accent-hover: #0b5f58;
+  --cs-accent-soft: #e3f1ef;
+  --cs-on-accent: #ffffff;
+  --cs-accent-rgb: 15, 118, 110;
+  --cs-overlay: rgb(15 18 20 / 38%);
+  --cs-ok: #2e7d4f;
+  --cs-warn: #b7791f;
+  --cs-danger: #c0392b;
+  --cs-info: #3b6ea5;
+  --cs-neutral: #8a8e96;
+  --cs-neutral-soft: #f0f0ed;
+  --cs-radius: 8px;
+  --cs-radius-control: 6px;
+  --cs-sidebar-w: 244px;
+  --cs-sidebar-w-collapsed: 68px;
+  --cs-topbar-h: 56px;
+  --cs-shadow-popover: 0 12px 32px rgb(27 29 33 / 14%);
+
+  --cs-surface-raised: var(--cs-surface-2);
+  --cs-sidebar-bg: var(--cs-surface);
+  --cs-muted: var(--cs-text-2);
+
+  --bs-primary: var(--cs-accent);
+  --bs-primary-rgb: var(--cs-accent-rgb);
+  --bs-link-color: var(--cs-accent);
+  --bs-link-color-rgb: 15, 118, 110;
+  --bs-link-hover-color: var(--cs-accent-hover);
+  --bs-body-bg: var(--cs-bg);
+  --bs-body-color: var(--cs-text);
+  --bs-border-color: var(--cs-border);
+  --bs-border-radius: var(--cs-radius-control);
+  --bs-font-sans-serif: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --bs-secondary-color: var(--cs-text-2);
+  --bs-secondary-bg: var(--cs-surface-2);
+  --bs-tertiary-bg: var(--cs-surface-2);
+  --bs-emphasis-color: var(--cs-text);
+  --bs-card-bg: var(--cs-surface);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --cs-bg: #0f1214;
+  --cs-surface: #161a1d;
+  --cs-surface-2: #1b2024;
+  --cs-border: #262b30;
+  --cs-text: #e7e9ea;
+  --cs-text-2: #b7bdc2;
+  --cs-text-3: #8a8e96;
+  --cs-accent: #3fb6a8;
+  --cs-accent-hover: #56c6b9;
+  --cs-accent-soft: #183b37;
+  --cs-on-accent: #0f1214;
+  --cs-accent-rgb: 63, 182, 168;
+  --cs-overlay: rgb(0 0 0 / 54%);
+  --cs-ok: #64b77f;
+  --cs-warn: #d5a451;
+  --cs-danger: #e2776c;
+  --cs-info: #79a9d8;
+  --cs-neutral: #8a8e96;
+  --cs-neutral-soft: #202529;
+  --cs-sidebar-bg: var(--cs-surface);
+
+  --bs-primary-rgb: var(--cs-accent-rgb);
+  --bs-link-color-rgb: 63, 182, 168;
+  --bs-secondary-color: var(--cs-text-2);
+  --bs-secondary-bg: var(--cs-surface-2);
+  --bs-tertiary-bg: var(--cs-surface-2);
+  --bs-emphasis-color: var(--cs-text);
+  --bs-form-control-bg: var(--cs-surface-2);
+  --bs-form-control-color: var(--cs-text);
+  --bs-table-color: var(--cs-text);
+  --bs-table-bg: var(--cs-surface);
+  --bs-table-border-color: var(--cs-border);
+}

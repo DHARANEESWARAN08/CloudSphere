@@ -1,0 +1,29 @@
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { useMutation,useQuery,useQueryClient } from '@tanstack/react-query';
+import { Bell,Check,CheckCheck,RefreshCw } from 'lucide-react';
+import PageHeader from '@/components/common/PageHeader';
+import { EmptyState,ErrorState,LoadingBlock } from '@/components/common/StateViews';
+import { useToast } from '@/components/common/ToastProvider';
+import { useAuth } from '@/features/auth/AuthContext';
+import { formatDateTime } from '@/lib/formatting';
+import { getData,postData } from '@/lib/api-client';
+interface Notification {notification_id:string;notification_type:string;title:string;payload:Record<string,unknown>|null;read_at:string|null;created_at:string;}
+function context(n:Notification,admin:boolean){
+ const p=n.payload??{};const resourceId=(key:string)=>/^\d+$/.test(String(p[key]))?String(p[key]):null;
+ if(n.notification_type==='HOST_LOW_CAPACITY') return {message:`${typeof p.hostname==='string'?p.hostname:'A host'} had less free capacity than its warning threshold when this alert was recorded. Review its current reservations before adding VMs.`,to:admin?'/admin/hosts':null,label:'Review host capacity'};
+ if(n.notification_type==='VM_REQUESTED') return {message:'A customer submitted a virtual machine request. Review its configuration and approve or reject it from the request queue.',to:'/admin/vm-requests',label:'Review VM request'};
+ if(n.notification_type==='VM_REQUEST_APPROVED') return {message:'Your VM request was approved and the virtual machine has been provisioned.',to:resourceId('vm_id')?`/vms/${resourceId('vm_id')}`:'/vms',label:'Open virtual machine'};
+ if(n.notification_type==='VM_REQUEST_REJECTED') return {message:typeof p.reason==='string'?`Your VM request was rejected. Reason: ${p.reason}`:'Your VM request was rejected by an administrator.',to:'/vms',label:'View VM requests'};
+ if(n.notification_type==='QUOTA_UPDATED') return {message:'An administrator changed your resource limits. Review the new limits before requesting another VM.',to:admin?'/admin/quotas':resourceId('project_id')?`/projects/${resourceId('project_id')}`:'/projects',label:'Review resource limits'};
+ if(resourceId('vm_id')) return {message:'Review the related virtual machine for its current status and available actions.',to:`/vms/${resourceId('vm_id')}`,label:'Open virtual machine'};
+ if(resourceId('invoice_id')) return {message:'A billing record needs your review. Charges in CloudSphere are simulated.',to:'/billing',label:'Review billing'};
+ if(resourceId('project_id')) return {message:'There is an update for one of your projects.',to:`/projects/${resourceId('project_id')}`,label:'Open project'};
+ return {message:typeof p.message==='string'?p.message:'An account update was recorded. Mark it as read after reviewing it.',to:null,label:''};
+}
+export default function NotificationsPage(){const [filter,setFilter]=useState('unread');const qc=useQueryClient();const toast=useToast();const {user}=useAuth();const query=useQuery({queryKey:['notifications','list'],queryFn:()=>getData<Notification[]>('/notifications'),refetchInterval:15000});const update=useMutation({mutationFn:(id:string)=>postData(id==='all'?'/notifications/read-all':`/notifications/${id}/read`),onSuccess:async(_,id)=>{await qc.invalidateQueries({queryKey:['notifications']});toast.success(id==='all'?'All notifications marked as read.':'Marked as read.');},onError:(e)=>toast.error(e.message)});const all=query.data??[];const unread=all.filter(n=>!n.read_at).length;const items=all.filter(n=>filter==='all'||!n.read_at);
+ return <><PageHeader title="Notifications" subtitle="Capacity alerts and account updates. New messages appear automatically." actions={<button className="btn btn-outline-primary btn-sm" disabled={!unread||update.isPending} onClick={()=>update.mutate('all')}><CheckCheck size={15} className="me-1"/>Mark all as read</button>}/>
+ <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3"><div className="d-flex gap-2" role="group" aria-label="Notification filter">{['unread','all'].map(f=><button key={f} aria-pressed={filter===f} className={`btn btn-sm ${f===filter?'btn-primary':'btn-outline-primary'}`} onClick={()=>setFilter(f)}>{f==='unread'?`Unread (${unread})`:`All (${all.length})`}</button>)}</div><button className="btn btn-outline-secondary btn-sm" disabled={query.isFetching} onClick={()=>query.refetch()}><RefreshCw size={14} className="me-1"/>Refresh</button></div>
+ {query.isPending&&<LoadingBlock rows={4}/>} {query.isError&&<ErrorState error={query.error} onRetry={()=>query.refetch()}/>} {query.isSuccess&&!items.length&&<EmptyState title={filter==='unread'?'You are caught up':'No notifications yet'} description={filter==='unread'?'Switch to All to review earlier messages.':'Capacity alerts and changes to your resource limits will appear here.'}/>}
+ <div className="d-grid gap-3">{items.map(n=>{const c=context(n,user?.role==='admin');return <article className="cs-card cs-card-body" key={n.notification_id}><div className="d-flex gap-3"><Bell size={20} className="flex-shrink-0" aria-hidden/><div className="flex-grow-1"><div className="d-flex flex-wrap justify-content-between gap-2"><h2 className="h5 mb-1">{n.title}</h2><span className="small text-muted">{n.read_at?'Read':'Unread'}</span></div><p className="mb-2">{c.message}</p><p className="small text-muted">{formatDateTime(n.created_at)}{n.notification_type==='HOST_LOW_CAPACITY'?' · Alert reflects capacity at that time':''}</p><div className="d-flex gap-2 flex-wrap">{c.to&&<Link className="btn btn-outline-primary btn-sm" to={c.to}>{c.label}</Link>}{!n.read_at&&<button className="btn btn-outline-secondary btn-sm" disabled={update.isPending} onClick={()=>update.mutate(n.notification_id)}><Check size={14} className="me-1"/>Mark as read</button>}</div></div></div></article>;})}</div></>;
+}

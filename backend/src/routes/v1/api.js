@@ -1,0 +1,635 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { pool, query } from '../../db/pool.js';
+import { requireAuth, requireCsrf } from '../../middleware/auth.js';
+
+import adminRouter from './admin.js';
+
+const router = Router();
+router.use(requireAuth, (req, res, next) => ['GET', 'HEAD', 'OPTIONS'].includes(req.method) ? next() : requireCsrf(req, res, next));
+router.use('/admin', adminRouter);
+const idSchema = z.string().regex(/^[1-9]\d*$/);
+const idParam = (value, res) => {
+  const parsed = idSchema.safeParse(value);
+  if (!parsed.success) { res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'A valid numeric identifier is required.' } }); return null; }
+  return parsed.data;
+};
+const fail = (res, code = 'NOT_FOUND', message = 'Resource not found.') => res.status(404).json({ error: { code, message } });
+const projectScope = (user, alias = 'p') => user.role === 'admin' ? 'TRUE' : `${alias}.organization_id = $1`;
+
+router.get('/projects', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT p.project_id, p.organization_id, p.name, p.description, p.status, p.monthly_budget,
+        p.created_at, q.max_vcpu, q.used_vcpu, q.max_ram_gb, q.used_ram_gb, q.max_vms, q.used_vms, q.max_storage_gb, q.used_storage_gb
+      FROM project p LEFT JOIN resource_quota q ON q.project_id = p.project_id
+      WHERE ${projectScope(req.user)} ORDER BY p.name`, req.user.role === 'admin' ? [] : [req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/organizations', async (req, res, next) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Administrator access is required.' } });
+  try {
+    const { rows } = await query(`SELECT organization_id, name FROM organization WHERE status = 'ACTIVE' ORDER BY name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+const requireAdminRole = (req, res) => {
+  if (req.user.role === 'admin') return true;
+  res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Administrator access is required.' } });
+  return false;
+};
+
+router.get('/admin/organizations', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  try {
+    const { rows } = await query(`SELECT o.organization_id, o.name, o.billing_email, o.status, o.created_at,
+        p.name AS plan_name, count(DISTINCT u.user_id)::int AS user_count, count(DISTINCT pr.project_id)::int AS project_count
+      FROM organization o JOIN subscription_plan p USING (subscription_plan_id)
+      LEFT JOIN app_user u USING (organization_id) LEFT JOIN project pr USING (organization_id)
+      GROUP BY o.organization_id, p.name ORDER BY o.name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/admin/users', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  try {
+    const { rows } = await query(`SELECT u.user_id, u.organization_id, o.name AS organization_name, u.email, u.full_name,
+        u.role, u.is_active, u.last_login_at, u.created_at
+      FROM app_user u LEFT JOIN organization o USING (organization_id)
+      ORDER BY o.name NULLS FIRST, u.full_name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/admin/plans', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  try {
+    const { rows } = await query(`SELECT plan_id, name FROM subscription_plan WHERE is_active ORDER BY monthly_fee, name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.post('/admin/organizations', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  const parsed = z.object({
+    name: z.string().trim().min(2).max(120), billing_email: z.string().trim().email().max(320),
+    plan_id: z.string().regex(/^[1-9]\d*$/), full_name: z.string().trim().min(2).max(120),
+    email: z.string().trim().email().max(320).toLowerCase(), password: z.string().min(12).max(200),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Enter valid organization and initial user details. Passwords must be at least 12 characters.' } });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { name, billing_email, plan_id, full_name, email, password } = parsed.data;
+    const { rows: plans } = await client.query('SELECT plan_id FROM subscription_plan WHERE plan_id = $1 AND is_active', [plan_id]);
+    if (!plans[0]) { await client.query('ROLLBACK'); return res.status(400).json({ error: { code: 'INVALID_PLAN', message: 'Choose an active subscription plan.' } }); }
+    const { rows: orgs } = await client.query(`INSERT INTO organization (name, subscription_plan_id, billing_email)
+      VALUES ($1,$2,$3) RETURNING organization_id, name, billing_email, status, created_at`, [name, plan_id, billing_email]);
+    const { rows: users } = await client.query(`INSERT INTO app_user (organization_id, email, password_hash, full_name, role)
+      VALUES ($1,$2,crypt($3, gen_salt('bf', 12)),$4,'customer')
+      RETURNING user_id, organization_id, email, full_name, role, is_active, created_at`, [orgs[0].organization_id, email, password, full_name]);
+    await client.query('COMMIT');
+    res.status(201).json({ data: { organization: orgs[0], initial_user: users[0] } });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') return res.status(409).json({ error: { code: 'ALREADY_EXISTS', message: 'That organization name or email is already in use.' } });
+    return next(error);
+  } finally { client.release(); }
+});
+
+router.post('/admin/users', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  const parsed = z.object({ organization_id: z.string().regex(/^[1-9]\d*$/), full_name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(320).toLowerCase(), password: z.string().min(12).max(200) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Enter a name, valid email, active organization, and password of at least 12 characters.' } });
+  try {
+    const { organization_id, full_name, email, password } = parsed.data;
+    const { rows: orgs } = await query(`SELECT 1 FROM organization WHERE organization_id = $1 AND status = 'ACTIVE'`, [organization_id]);
+    if (!orgs[0]) return fail(res, 'NOT_FOUND', 'Active organization not found.');
+    const { rows } = await query(`INSERT INTO app_user (organization_id, email, password_hash, full_name, role)
+      VALUES ($1,$2,crypt($3, gen_salt('bf', 12)),$4,'customer')
+      RETURNING user_id, organization_id, email, full_name, role, is_active, created_at`, [organization_id, email, password, full_name]);
+    res.status(201).json({ data: rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: { code: 'ACCOUNT_EXISTS', message: 'An account with this email already exists.' } });
+    next(error);
+  }
+});
+
+router.patch('/admin/organizations/:organizationId/status', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  const organizationId = idParam(req.params.organizationId, res); if (!organizationId) return;
+  const parsed = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Status must be ACTIVE or SUSPENDED.' } });
+  try {
+    const { rows } = await query(`UPDATE organization SET status = $2 WHERE organization_id = $1 RETURNING organization_id, status`, [organizationId, parsed.data.status]);
+    if (!rows[0]) return fail(res);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.patch('/admin/users/:userId/status', async (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
+  const userId = idParam(req.params.userId, res); if (!userId) return;
+  const parsed = z.object({ is_active: z.boolean() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'is_active must be a boolean.' } });
+  if (userId === String(req.user.user_id) && !parsed.data.is_active) return res.status(400).json({ error: { code: 'INVALID_ACTION', message: 'You cannot deactivate your own account.' } });
+  try {
+    const { rows } = await query(`UPDATE app_user SET is_active = $2 WHERE user_id = $1 RETURNING user_id, is_active`, [userId, parsed.data.is_active]);
+    if (!rows[0]) return fail(res);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/projects/:projectId', async (req, res, next) => {
+  const projectId = idParam(req.params.projectId, res); if (!projectId) return;
+  try {
+    const { rows } = await query(`SELECT p.project_id, p.organization_id, p.name, p.description, p.status, p.monthly_budget, p.created_at,
+      q.max_vcpu, q.used_vcpu, q.max_ram_gb, q.used_ram_gb, q.max_vms, q.used_vms, q.max_storage_gb, q.used_storage_gb
+      FROM project p LEFT JOIN resource_quota q ON q.project_id = p.project_id
+      WHERE p.project_id = $1 AND ($2::boolean OR p.organization_id = $3)`, [projectId, req.user.role === 'admin', req.user.organization_id]);
+    if (!rows[0]) return fail(res);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.post('/projects', async (req, res, next) => {
+  try {
+    const parsed = z.object({ name: z.string().trim().min(2).max(100), description: z.string().trim().max(1000).optional().nullable(), monthly_budget: z.number().nonnegative().finite().optional().nullable(), organization_id: z.string().regex(/^[1-9]\d*$/).optional() }).safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Project details are invalid.' } });
+    const { name, description, monthly_budget } = parsed.data;
+    const organizationId = req.user.role === 'admin' ? parsed.data.organization_id : req.user.organization_id;
+    if (!organizationId) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Choose an organization for this project.' } });
+    const organization = await query(`SELECT 1 FROM organization WHERE organization_id = $1 AND status = 'ACTIVE'`, [organizationId]);
+    if (!organization.rowCount) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'The selected organization was not found or is inactive.' } });
+    const { rows } = await query(`INSERT INTO project (organization_id,name,description,monthly_budget,created_by)
+      VALUES ($1,$2,$3,$4,$5) RETURNING project_id, organization_id, name, description, status, monthly_budget, created_at`,
+      [organizationId, name, description ?? null, monthly_budget ?? null, req.user.user_id]);
+    res.status(201).json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/regions', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT r.region_id,r.code,r.name,r.country,cp.carbon_intensity_gco2_kwh
+      FROM cloud_region r LEFT JOIN carbon_profile cp ON cp.region_id=r.region_id AND cp.effective_to IS NULL
+      WHERE r.is_active ORDER BY r.name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/configurations', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT vm_configuration_id,name,vcpu,ram_gb,os_family,os_image
+      FROM vm_configuration WHERE is_catalog ORDER BY vcpu,ram_gb,os_family,name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+// Spot bids are persisted requests only. Fulfillment remains a separate operation and never
+// allocates a VM implicitly; any resulting VM must use the existing allocation procedure.
+router.get('/spot-requests', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT b.bid_id,b.project_id,p.name AS project_name,b.requested_by,
+        b.vm_configuration_id,c.name AS configuration_name,c.vcpu,c.ram_gb,c.os_family,
+        b.region_id,r.code AS region_code,r.name AS region_name,b.max_price_per_hour,
+        b.status,b.fulfilled_vm_id,vm.name AS fulfilled_vm_name,b.fulfilled_price_per_hour,
+        b.expires_at,b.fulfilled_at,b.preempted_at,b.created_at,b.updated_at
+      FROM spot_bid_request b JOIN project p USING(project_id)
+      JOIN vm_configuration c USING(vm_configuration_id)
+      LEFT JOIN cloud_region r USING(region_id)
+      LEFT JOIN virtual_machine vm ON vm.vm_id=b.fulfilled_vm_id
+      WHERE ($1::boolean OR p.organization_id=$2)
+      ORDER BY (b.status='OPEN') DESC,b.created_at DESC,b.bid_id DESC`,
+    [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.post('/spot-requests', async (req, res, next) => {
+  const parsed = z.object({
+    project_id: z.string().regex(/^[1-9]\d*$/),
+    vm_configuration_id: z.string().regex(/^[1-9]\d*$/),
+    region_id: z.string().regex(/^[1-9]\d*$/).nullable().optional(),
+    max_price_per_hour: z.number().positive().finite().max(99999999.9999),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Spot request fields are invalid.' } });
+  const { project_id, vm_configuration_id, region_id, max_price_per_hour } = parsed.data;
+  try {
+    const { rows } = await query(`INSERT INTO spot_bid_request
+        (project_id,requested_by,vm_configuration_id,region_id,max_price_per_hour)
+      SELECT p.project_id,$2,c.vm_configuration_id,$4,$5
+      FROM project p JOIN vm_configuration c ON c.vm_configuration_id=$3 AND c.is_catalog
+      WHERE p.project_id=$1 AND p.status='ACTIVE'
+        AND ($6::boolean OR p.organization_id=$7)
+        AND ($4::bigint IS NULL OR EXISTS (SELECT 1 FROM cloud_region r WHERE r.region_id=$4 AND r.is_active))
+      RETURNING bid_id`, [project_id, req.user.user_id, vm_configuration_id, region_id ?? null,
+      max_price_per_hour, req.user.role === 'admin', req.user.organization_id]);
+    if (!rows[0]) return fail(res, 'RESOURCE_UNAVAILABLE', 'The project, configuration, or region is unavailable.');
+    const bid = await query(`SELECT b.bid_id,b.project_id,p.name AS project_name,b.requested_by,
+        b.vm_configuration_id,c.name AS configuration_name,c.vcpu,c.ram_gb,c.os_family,
+        b.region_id,r.code AS region_code,r.name AS region_name,b.max_price_per_hour,
+        b.status,b.fulfilled_vm_id,vm.name AS fulfilled_vm_name,b.fulfilled_price_per_hour,
+        b.expires_at,b.fulfilled_at,b.preempted_at,b.created_at,b.updated_at
+      FROM spot_bid_request b JOIN project p USING(project_id)
+      JOIN vm_configuration c USING(vm_configuration_id)
+      LEFT JOIN cloud_region r USING(region_id)
+      LEFT JOIN virtual_machine vm ON vm.vm_id=b.fulfilled_vm_id
+      WHERE b.bid_id=$1`, [rows[0].bid_id]);
+    res.status(201).json({ data: bid.rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/quotas', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT quota_id,organization_id,project_id,max_vcpu,used_vcpu,max_ram_gb,used_ram_gb,max_vms,used_vms,max_storage_gb,used_storage_gb
+      FROM resource_quota WHERE ($1::boolean OR organization_id=$2) ORDER BY project_id NULLS FIRST,quota_id`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/carbon-profiles', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT cp.carbon_profile_id, r.region_id, r.code AS region_code, r.name AS region_name,
+        r.country, cp.version, cp.carbon_intensity_gco2_kwh, cp.effective_from, cp.effective_to
+      FROM carbon_profile cp JOIN cloud_region r USING (region_id)
+      WHERE r.is_active AND cp.effective_to IS NULL
+      ORDER BY cp.carbon_intensity_gco2_kwh, r.name`);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/sla-records', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT s.sla_record_id, s.vm_id, vm.name AS vm_name, vm.project_id, p.name AS project_name,
+        r.code AS region_code, r.name AS region_name, plan.name AS plan_name,
+        s.period_start, s.period_end, s.target_uptime_pct, s.measured_uptime_pct, s.expected_samples,
+        s.received_samples, s.downtime_minutes, s.is_breach, s.computed_at
+      FROM sla_record s
+      JOIN virtual_machine vm USING (vm_id)
+      JOIN project p USING (project_id)
+      JOIN subscription_plan plan ON plan.plan_id = s.subscription_plan_id
+      LEFT JOIN cloud_host h ON h.host_id = vm.host_id
+      LEFT JOIN cloud_region r ON r.region_id = h.region_id
+      WHERE ($1::boolean OR p.organization_id = $2)
+      ORDER BY s.period_end DESC, s.sla_record_id DESC`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/recommendations', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT rl.recommendation_id, rl.vm_id, vm.name AS vm_name, vm.project_id,
+        p.name AS project_name, rl.recommendation_type, rl.rule_code, rl.trigger_metrics,
+        rl.window_start, rl.window_end, rl.recommended_vm_configuration_id,
+        cfg.name AS recommended_configuration_name, cfg.vcpu AS recommended_vcpu, cfg.ram_gb AS recommended_ram_gb,
+        rl.estimated_monthly_saving, rl.status, rl.created_at
+      FROM recommendation_log rl
+      JOIN virtual_machine vm USING (vm_id)
+      JOIN project p USING (project_id)
+      LEFT JOIN vm_configuration cfg ON cfg.vm_configuration_id = rl.recommended_vm_configuration_id
+      WHERE ($1::boolean OR p.organization_id = $2)
+      ORDER BY (rl.status = 'PENDING') DESC, rl.created_at DESC, rl.recommendation_id DESC`,
+    [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+// Read-only storage inventory. Scope volume and snapshot rows through their owning project,
+// keeping the database's organization boundary intact for every customer request.
+router.get('/volumes', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT v.volume_id,v.project_id,p.name AS project_name,v.region_id,r.code AS region_code,
+        v.vm_id,vm.name AS vm_name,v.name,v.size_gb,v.used_gb,v.volume_type,v.is_root,v.state,v.created_at
+      FROM storage_volume v JOIN project p USING(project_id)
+      JOIN cloud_region r USING(region_id) LEFT JOIN virtual_machine vm USING(vm_id)
+      WHERE v.state <> 'DELETED' AND ($1::boolean OR p.organization_id=$2)
+      ORDER BY v.created_at DESC,v.volume_id DESC`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/snapshots', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT s.snapshot_id,s.volume_id,v.project_id,p.name AS project_name,
+        v.name AS volume_name,vm.name AS vm_name,s.name,s.status,s.size_gb,s.taken_at,s.retention_days,s.expires_at,s.created_at
+      FROM backup_snapshot s JOIN storage_volume v USING(volume_id) JOIN project p USING(project_id)
+      LEFT JOIN virtual_machine vm USING(vm_id)
+      WHERE ($1::boolean OR p.organization_id=$2)
+      ORDER BY s.taken_at DESC,s.snapshot_id DESC`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+// Network inventory is read through the owning project so customers only see their organization's
+// networks, rules, and load balancers. Network configuration remains managed by the existing schema.
+router.get('/networks', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT n.virtual_network_id,n.project_id,p.name AS project_name,n.region_id,r.code AS region_code,
+        n.parent_network_id,parent.name AS parent_network_name,n.name,n.cidr_block::text AS cidr_block,n.created_at,
+        count(DISTINCT vm.vm_id)::int AS attached_vm_count,
+        coalesce(string_agg(DISTINCT vm.name, ', ' ORDER BY vm.name) FILTER (WHERE vm.vm_id IS NOT NULL), '') AS attached_vm_names,
+        (SELECT count(*)::int FROM firewall_rule fr WHERE fr.virtual_network_id=n.virtual_network_id) AS firewall_rule_count
+      FROM virtual_network n JOIN project p USING(project_id) JOIN cloud_region r USING(region_id)
+      LEFT JOIN virtual_network parent ON parent.virtual_network_id=n.parent_network_id
+      LEFT JOIN virtual_machine vm ON vm.subnet_id=n.virtual_network_id
+      WHERE ($1::boolean OR p.organization_id=$2)
+      GROUP BY n.virtual_network_id,p.name,r.code,parent.name
+      ORDER BY p.name,n.parent_network_id NULLS FIRST,n.name`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/firewall-rules', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT fr.firewall_rule_id,fr.virtual_network_id,n.name AS network_name,n.cidr_block::text AS network_cidr,
+        n.project_id,p.name AS project_name,fr.direction,fr.action,fr.protocol,fr.port_from,fr.port_to,
+        fr.remote_cidr::text AS remote_cidr,fr.priority,fr.description,fr.created_at
+      FROM firewall_rule fr JOIN virtual_network n USING(virtual_network_id) JOIN project p USING(project_id)
+      WHERE ($1::boolean OR p.organization_id=$2)
+      ORDER BY p.name,n.name,fr.direction,fr.priority,fr.firewall_rule_id`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/load-balancers', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT lb.load_balancer_id,lb.project_id,p.name AS project_name,lb.virtual_network_id,n.name AS network_name,
+        n.cidr_block::text AS network_cidr,lb.name,lb.algorithm,lb.listener_protocol,lb.listener_port,lb.status,lb.created_at,
+        count(DISTINCT vm.vm_id)::int AS attached_vm_count,
+        coalesce(string_agg(DISTINCT vm.name, ', ' ORDER BY vm.name) FILTER (WHERE vm.vm_id IS NOT NULL), '') AS attached_vm_names
+      FROM load_balancer lb JOIN project p USING(project_id) JOIN virtual_network n USING(virtual_network_id)
+      LEFT JOIN virtual_machine vm ON vm.load_balancer_id=lb.load_balancer_id
+      WHERE ($1::boolean OR p.organization_id=$2)
+      GROUP BY lb.load_balancer_id,p.name,n.name,n.cidr_block
+      ORDER BY p.name,lb.name`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/billing/invoices', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT i.invoice_id,i.organization_id,i.project_id,p.name AS project_name,i.invoice_type,
+        i.period_start,i.period_end,i.subtotal,i.tax_amount,i.total_amount,i.usage_breakdown,i.status,i.issued_at,i.due_date,i.created_at,
+        coalesce(jsonb_agg(jsonb_build_object('payment_id',pay.payment_id,'amount',pay.amount,'method',pay.method,
+          'status',pay.status,'transaction_ref',pay.transaction_ref,'paid_at',pay.paid_at,'created_at',pay.created_at)
+          ORDER BY pay.created_at DESC) FILTER (WHERE pay.payment_id IS NOT NULL), '[]'::jsonb) AS payments
+      FROM billing_invoice i LEFT JOIN project p USING(project_id) LEFT JOIN payment pay USING(invoice_id)
+      WHERE ($1::boolean OR i.organization_id=$2)
+      GROUP BY i.invoice_id,p.name
+      ORDER BY i.period_start DESC,i.invoice_id DESC`, [req.user.role === 'admin', req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/dashboard/summary', async (req, res, next) => {
+  try {
+    if (req.user.role === 'admin') {
+      const { rows } = await query(`SELECT 'admin'::text AS role,
+        (SELECT count(*)::int FROM cloud_host) AS total_hosts,
+        (SELECT count(*)::int FROM virtual_machine WHERE state NOT IN ('TERMINATED','PREEMPTED','FAILED')) AS total_vms,
+        (SELECT coalesce(sum(total_cpu),0)::int FROM cloud_host) AS total_cpu,
+        (SELECT coalesce(sum(allocated_cpu),0)::int FROM cloud_host) AS allocated_cpu,
+        (SELECT coalesce(sum(total_ram_gb),0)::int FROM cloud_host) AS total_ram_gb,
+        (SELECT coalesce(sum(allocated_ram_gb),0)::int FROM cloud_host) AS allocated_ram_gb,
+        (SELECT count(*)::int FROM cloud_host WHERE status='ACTIVE' AND (free_cpu < total_cpu*low_capacity_threshold_pct/100 OR free_ram_gb < total_ram_gb*low_capacity_threshold_pct/100)) AS hosts_near_capacity,
+        (SELECT count(*)::int FROM organization WHERE status='ACTIVE') AS active_organizations,
+        (SELECT count(*)::int FROM project WHERE status='ACTIVE') AS active_projects,
+        (SELECT count(*)::int FROM spot_bid_request WHERE status='OPEN') AS pending_spot_requests,
+        (SELECT count(*)::int FROM vm_request WHERE status='PENDING') AS pending_vm_requests`);
+      return res.json({ data: rows[0] });
+    }
+    const { rows } = await query(`WITH mine AS (
+      SELECT vm.*,c.vcpu,c.ram_gb FROM virtual_machine vm JOIN project p USING(project_id)
+      JOIN vm_configuration c USING(vm_configuration_id) WHERE p.organization_id=$1
+    ), q AS (SELECT sum(used_vcpu)::int used_vcpu,sum(max_vcpu)::int max_vcpu,sum(used_ram_gb)::int used_ram_gb,
+      sum(max_ram_gb)::int max_ram_gb,sum(used_vms)::int used_vms,sum(max_vms)::int max_vms FROM resource_quota WHERE organization_id=$1 AND project_id IS NOT NULL),
+    spend AS (SELECT coalesce(sum(project_projected_monthly_cost(p.project_id)),0)::numeric(12,2) amount FROM project p WHERE p.organization_id=$1)
+      SELECT 'customer'::text AS role, count(*)::int AS total_vms,
+        count(*) FILTER (WHERE state='RUNNING')::int AS running_vms,count(*) FILTER (WHERE state='STOPPED')::int AS stopped_vms,
+        coalesce(sum(vcpu) FILTER (WHERE state IN ('PROVISIONING','RUNNING','STOPPED')),0)::int AS allocated_vcpu,
+        coalesce(sum(ram_gb) FILTER (WHERE state IN ('PROVISIONING','RUNNING','STOPPED')),0)::int AS allocated_ram_gb,
+        (SELECT to_jsonb(q) FROM q) AS quota, (SELECT amount::text FROM spend) AS estimated_usage_charges,
+        (SELECT count(*)::int FROM recommendation_log rl JOIN mine m USING(vm_id) WHERE rl.status='PENDING') AS pending_recommendations,
+        (SELECT count(*)::int FROM support_ticket t JOIN project p USING(project_id) WHERE p.organization_id=$1 AND t.status NOT IN ('RESOLVED','CLOSED')) AS open_tickets
+      FROM mine WHERE state NOT IN ('TERMINATED','PREEMPTED','FAILED')`, [req.user.organization_id]);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/vms', async (req, res, next) => {
+  try {
+    const projectId = req.query.project_id ? idParam(String(req.query.project_id), res) : null;
+    if (req.query.project_id && !projectId) return;
+    const { rows } = await query(`SELECT vm.vm_id,vm.project_id,p.name AS project_name,vm.name,vm.state,vm.is_spot,vm.host_id,h.hostname,r.code AS region_code,
+      vm.vm_configuration_id,c.vcpu,c.ram_gb,c.os_family,c.os_image,vm.requested_at,vm.started_at,vm.stopped_at,vm.created_at
+      FROM virtual_machine vm JOIN project p USING(project_id) JOIN vm_configuration c USING(vm_configuration_id)
+      LEFT JOIN cloud_host h USING(host_id) LEFT JOIN cloud_region r USING(region_id)
+      WHERE ($1::boolean OR p.organization_id=$2) AND ($3::bigint IS NULL OR p.project_id=$3)
+      ORDER BY vm.created_at DESC,vm.vm_id DESC`, [req.user.role === 'admin', req.user.organization_id, projectId]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.post('/vms/estimate', async (req, res, next) => {
+  const parsed = z.object({ project_id: z.string().regex(/^[1-9]\d*$/), vcpu: z.number().int().min(1).max(256), ram_gb: z.number().int().min(1).max(4096), storage_gb: z.number().int().min(1).max(65536) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'VM size and project are invalid.' } });
+  try {
+    const { project_id, vcpu, ram_gb, storage_gb } = parsed.data;
+    const { rows } = await query(`SELECT e.* FROM estimate_vm_cost($1,$2,$3,$4) e
+      JOIN project p ON p.project_id=$1 WHERE ($5::boolean OR p.organization_id=$6)`, [project_id, vcpu, ram_gb, storage_gb, req.user.role === 'admin', req.user.organization_id]);
+    if (!rows[0]) return fail(res);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+const createVmSchema = z.object({ project_id: z.string().regex(/^[1-9]\d*$/), name: z.string().trim().min(1).max(100), vcpu: z.number().int().min(1).max(256), ram_gb: z.number().int().min(1).max(4096), storage_gb: z.number().int().min(1).max(65536), os_image: z.string().trim().min(1).max(200), volume_type: z.enum(['SSD','HDD']).default('SSD'), region_id: z.string().regex(/^[1-9]\d*$/).nullable().optional(), max_hourly_budget: z.number().nonnegative().finite().nullable().optional() });
+router.get('/vm-requests', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT vr.vm_request_id,vr.project_id,p.name AS project_name,vr.name,vr.vcpu,vr.ram_gb,
+        vr.storage_gb,vr.os_image,vr.volume_type,vr.region_id,r.name AS region_name,vr.max_hourly_budget,
+        vr.status,vr.decision_reason,vr.vm_id,vr.created_at,vr.reviewed_at
+      FROM vm_request vr JOIN project p USING(project_id) LEFT JOIN cloud_region r USING(region_id)
+      WHERE vr.requested_by=$1 ORDER BY vr.created_at DESC,vr.vm_request_id DESC LIMIT 50`, [req.user.user_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.post('/vm-requests', async (req, res, next) => {
+  const parsed = createVmSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'VM request fields are invalid.' } });
+  const v = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: projects } = await client.query(`SELECT p.project_id,p.name FROM project p JOIN organization o USING(organization_id)
+      WHERE p.project_id=$1 AND p.status='ACTIVE' AND o.status='ACTIVE'
+        AND ($2::boolean OR p.organization_id=$3)`, [v.project_id,req.user.role==='admin',req.user.organization_id]);
+    if (!projects[0]) { await client.query('ROLLBACK'); return fail(res); }
+    const { rows } = await client.query(`INSERT INTO vm_request(project_id,requested_by,name,vcpu,ram_gb,storage_gb,os_image,volume_type,region_id,max_hourly_budget)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      RETURNING vm_request_id,project_id,name,vcpu,ram_gb,storage_gb,os_image,volume_type,region_id,max_hourly_budget,status,created_at`,
+      [v.project_id,req.user.user_id,v.name,v.vcpu,v.ram_gb,v.storage_gb,v.os_image,v.volume_type,v.region_id ?? null,v.max_hourly_budget ?? null]);
+    const request = rows[0];
+    const payload = JSON.stringify({ vm_request_id:request.vm_request_id, project_id:request.project_id, requester_name:req.user.full_name });
+    const notice = await client.query(`INSERT INTO notification_queue(user_id,notification_type,title,payload,status,sent_at)
+      SELECT user_id,'VM_REQUESTED',$1,$2,'SENT',now() FROM app_user WHERE role='admin' AND is_active`,
+      [`VM request needs review: ${request.name}`,payload]);
+    if (!notice.rowCount) { await client.query('ROLLBACK'); return res.status(503).json({error:{code:'ADMIN_UNAVAILABLE',message:'No active administrator can receive this request right now.'}}); }
+    await client.query(`INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,new_values)
+      VALUES($1,'vm_request.submitted','vm_request',$2,$3)`, [req.user.user_id,request.vm_request_id,JSON.stringify({name:request.name,project_id:request.project_id,vcpu:request.vcpu,ram_gb:request.ram_gb,storage_gb:request.storage_gb})]);
+    await client.query('COMMIT');
+    res.status(201).json({ data:request });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(()=>{});
+    if(error.code==='23505') return res.status(409).json({error:{code:'DUPLICATE_VM_REQUEST',message:'A VM request with this name is already waiting for review in this project.'}});
+    next(error);
+  } finally { client.release(); }
+});
+
+router.post('/vms', (req, res) => {
+  res.status(409).json({ error:{code:'ADMIN_REVIEW_REQUIRED',message:'VMs must be submitted as requests for administrator review.'} });
+});
+
+const lifecycle = { start: 'start_vm', stop: 'stop_vm', terminate: 'terminate_vm' };
+for (const [action, procedure] of Object.entries(lifecycle)) {
+  router.post(`/vms/:vmId/${action}`, async (req, res, next) => {
+    const vmId = idParam(req.params.vmId, res); if (!vmId) return;
+    try {
+      await query(`CALL ${procedure}($1::bigint,$2::bigint)`, [req.user.user_id, vmId]);
+      const { rows } = await query(`SELECT vm_id,project_id,name,state,host_id,started_at,stopped_at,terminated_at FROM virtual_machine WHERE vm_id=$1`, [vmId]);
+      res.json({ data: rows[0] });
+    } catch (error) { next(error); }
+  });
+}
+
+const vmAccess = `($2::boolean OR p.organization_id=$3)`;
+router.get('/vms/:vmId', async (req, res, next) => {
+  const vmId = idParam(req.params.vmId, res); if (!vmId) return;
+  try {
+    const { rows } = await query(`SELECT vm.vm_id,vm.project_id,p.name AS project_name,p.organization_id,vm.name,vm.state,vm.is_spot,vm.host_id,h.hostname,r.region_id,r.code AS region_code,r.name AS region_name,
+      c.vcpu,c.ram_gb,c.os_family,c.os_image,vm.private_ip::text,vm.requested_at,vm.started_at,vm.stopped_at,vm.terminated_at,vm.created_at
+      FROM virtual_machine vm JOIN project p USING(project_id) JOIN vm_configuration c USING(vm_configuration_id)
+      LEFT JOIN cloud_host h USING(host_id) LEFT JOIN cloud_region r USING(region_id)
+      WHERE vm.vm_id=$1 AND ${vmAccess}`, [vmId,req.user.role==='admin',req.user.organization_id]);
+    if (!rows[0]) return fail(res);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/vms/:vmId/metrics', async (req, res, next) => {
+  const vmId = idParam(req.params.vmId, res); if (!vmId) return;
+  try {
+    const { rows } = await query(`SELECT m.vm_id,m.logged_at,m.cpu_pct,m.ram_pct,m.disk_pct,m.net_in_kbps,m.net_out_kbps
+      FROM monitoring_log m JOIN virtual_machine vm USING(vm_id) JOIN project p USING(project_id)
+      WHERE m.vm_id=$1 AND ${vmAccess} AND m.logged_at >= now() - interval '24 hours'
+      ORDER BY m.logged_at`, [vmId,req.user.role==='admin',req.user.organization_id]);
+    if (!rows.length) {
+      const exists = await query(`SELECT 1 FROM virtual_machine vm JOIN project p USING(project_id) WHERE vm.vm_id=$1 AND ${vmAccess}`,[vmId,req.user.role==='admin',req.user.organization_id]);
+      if (!exists.rowCount) return fail(res);
+    }
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/monitoring/summary', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT vm.vm_id,vm.name,vm.state,
+        round(avg(m.cpu_pct),2) AS avg_cpu_pct,round(avg(m.ram_pct),2) AS avg_ram_pct,
+        round(max(m.cpu_pct),2) AS max_cpu_pct,round(max(m.ram_pct),2) AS max_ram_pct,
+        round(avg(m.disk_pct),2) AS avg_disk_pct,count(m.logged_at)::int AS sample_count,max(m.logged_at) AS latest_sample_at
+      FROM virtual_machine vm JOIN project p USING(project_id) LEFT JOIN monitoring_log m
+        ON m.vm_id=vm.vm_id AND m.logged_at >= now()-interval '24 hours'
+      WHERE ($1::boolean OR p.organization_id=$2) GROUP BY vm.vm_id,vm.name,vm.state ORDER BY vm.name`, [req.user.role==='admin',req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/notifications', async (req, res, next) => {
+  try {
+    // A queued notification becomes delivered when it is pulled into this user's inbox.
+    // This keeps SENT/sent_at meaningful without pretending that an external channel exists.
+    await query(`UPDATE notification_queue SET status='SENT',sent_at=coalesce(sent_at,now())
+      WHERE user_id=$1 AND status='PENDING'`, [req.user.user_id]);
+    const { rows } = await query(`SELECT notification_id,notification_type,title,payload,read_at,sent_at,created_at
+      FROM notification_queue WHERE user_id=$1 AND status='SENT'
+      ORDER BY created_at DESC,notification_id DESC`, [req.user.user_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.post('/notifications/read-all', async (req, res, next) => {
+  try {
+    const result = await query(`UPDATE notification_queue SET read_at=now() WHERE user_id=$1 AND read_at IS NULL AND status IN ('PENDING','SENT')`, [req.user.user_id]);
+    res.json({data:{updated:result.rowCount}});
+  } catch (e) { next(e); }
+});
+
+router.post('/notifications/:notificationId/read', async (req, res, next) => {
+  const notificationId = idParam(req.params.notificationId, res); if (!notificationId) return;
+  try {
+    const { rows } = await query(`UPDATE notification_queue SET read_at=coalesce(read_at,now())
+      WHERE notification_id=$1 AND user_id=$2 AND status IN ('PENDING','SENT')
+      RETURNING notification_id,notification_type,title,payload,read_at,sent_at,created_at`, [notificationId, req.user.user_id]);
+    if (!rows[0]) return fail(res);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/notifications/unread-count', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT count(*)::int AS count FROM notification_queue WHERE user_id=$1 AND read_at IS NULL AND status IN ('PENDING','SENT')`, [req.user.user_id]);
+    res.json({ data: rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.get('/support/tickets', async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT t.ticket_id,t.created_by,creator.full_name AS creator_name,
+        t.assigned_to,assignee.full_name AS assignee_name,t.project_id,p.name AS project_name,
+        t.vm_id,vm.name AS vm_name,t.subject,t.description,t.priority,t.status,t.resolved_at,t.created_at,t.updated_at
+      FROM support_ticket t
+      JOIN app_user creator ON creator.user_id=t.created_by
+      LEFT JOIN app_user assignee ON assignee.user_id=t.assigned_to
+      LEFT JOIN project p ON p.project_id=t.project_id
+      LEFT JOIN virtual_machine vm ON vm.vm_id=t.vm_id
+      WHERE ($1::boolean OR t.created_by=$2 OR p.organization_id=$3 OR EXISTS (
+        SELECT 1 FROM project vp WHERE vp.project_id=vm.project_id AND vp.organization_id=$3))
+      ORDER BY t.updated_at DESC,t.ticket_id DESC`, [req.user.role === 'admin',req.user.user_id,req.user.organization_id]);
+    res.json({ data: rows });
+  } catch (error) { next(error); }
+});
+
+router.post('/support/tickets', async (req, res, next) => {
+  const parsed = z.object({
+    subject: z.string().trim().min(5).max(160),
+    description: z.string().trim().min(10).max(5000),
+    priority: z.enum(['LOW','MEDIUM','HIGH','CRITICAL']).default('MEDIUM'),
+    project_id: z.string().regex(/^[1-9]\d*$/).nullable().optional(),
+    vm_id: z.string().regex(/^[1-9]\d*$/).nullable().optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Support ticket details are invalid.' } });
+  const { subject,description,priority,project_id,vm_id } = parsed.data;
+  try {
+    const { rows } = await query(`INSERT INTO support_ticket (created_by,project_id,vm_id,subject,description,priority)
+      SELECT $1,$2,$3,$4,$5,$6
+      WHERE ($2::bigint IS NULL OR EXISTS (SELECT 1 FROM project p WHERE p.project_id=$2 AND ($7::boolean OR p.organization_id=$8)))
+        AND ($3::bigint IS NULL OR EXISTS (SELECT 1 FROM virtual_machine vm JOIN project p USING(project_id)
+          WHERE vm.vm_id=$3 AND ($2::bigint IS NULL OR vm.project_id=$2) AND ($7::boolean OR p.organization_id=$8)))
+      RETURNING ticket_id`, [req.user.user_id,project_id ?? null,vm_id ?? null,subject,description,priority,
+      req.user.role === 'admin',req.user.organization_id]);
+    if (!rows[0]) return fail(res, 'RESOURCE_UNAVAILABLE', 'The selected project or VM is unavailable.');
+    const ticket = await query(`SELECT t.ticket_id,t.created_by,creator.full_name AS creator_name,
+        t.assigned_to,assignee.full_name AS assignee_name,t.project_id,p.name AS project_name,
+        t.vm_id,vm.name AS vm_name,t.subject,t.description,t.priority,t.status,t.resolved_at,t.created_at,t.updated_at
+      FROM support_ticket t JOIN app_user creator ON creator.user_id=t.created_by
+      LEFT JOIN app_user assignee ON assignee.user_id=t.assigned_to
+      LEFT JOIN project p ON p.project_id=t.project_id LEFT JOIN virtual_machine vm ON vm.vm_id=t.vm_id
+      WHERE t.ticket_id=$1`, [rows[0].ticket_id]);
+    res.status(201).json({ data: ticket.rows[0] });
+  } catch (error) { next(error); }
+});
+
+export default router;
