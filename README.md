@@ -6,6 +6,28 @@ CloudSphere lets customers organize projects, request virtual machines, and trac
 
 > Academic simulation: VM records represent simulated infrastructure. The application does not boot real virtual machines or process real payments.
 
+## Academic submission
+
+**Semester:** Fall 2026–2027
+**Course:** BACSE202 – Database Management Systems
+**Faculty:** Dr. S. Geetha
+
+| Team member | Register number |
+| --- | --- |
+| Dharaneeshwaran | 25BCE5350 |
+| Rohith V S | 25BCE5776 |
+| Raakesh M | 25BCE1991 |
+
+[YouTube demonstration](https://youtu.be/pPAymDPT_og) · [Technical report](report/DBMS_Project_Report.pdf) · [Presentation](presentation/DBMS_Project_Presentation.pptx)
+
+### Problem statement
+
+Cloud resource requests require consistent approval decisions, capacity reservations, and project limits. Independent records can lead to over-allocation and unclear ownership. CloudSphere demonstrates how a relational database can coordinate these records for customers and administrators.
+
+### Abstract
+
+CloudSphere is a database-backed cloud infrastructure management simulator. Customers organize projects, estimate costs, and submit virtual machine requests. Administrators approve or reject requests while PostgreSQL routines enforce capacity, quota, and budget rules. The application combines a React interface, an Express API, and PostgreSQL 18. Primary keys, foreign keys, CHECK constraints, transactions, row locks, and audit records maintain consistency across related resources. Synthetic sample data supports demonstrations of SQL joins, aggregation, subqueries, and VM lifecycle operations. The project demonstrates persistent request-to-approval workflows and resource accounting. It does not provision real virtual machines or process payments.
+
 ## Screenshots
 
 Captured from the running local application using a demonstration account. Resource counts and dates reflect the demo database at capture time.
@@ -14,19 +36,19 @@ Captured from the running local application using a demonstration account. Resou
 
 View VM status, allocated resources, estimated spend, and quota utilization.
 
-![CloudSphere customer workspace showing resource summaries, quotas, and recent virtual machines](docs/images/workspace-overview.jpg)
+![CloudSphere customer workspace showing resource summaries, quotas, and recent virtual machines](screenshots/workspace-overview.jpg)
 
 ### Request a virtual machine
 
 Choose a project, CPU, RAM, storage, operating system, and region before requesting administrator approval.
 
-![CloudSphere VM request form with configuration fields and cost estimate panel](docs/images/vm-request.jpg)
+![CloudSphere VM request form with configuration fields and cost estimate panel](screenshots/vm-request.jpg)
 
 ### Sign in
 
 Customer and administrator accounts use the same sign-in screen and enter their respective consoles.
 
-![CloudSphere sign-in screen](docs/images/login.jpg)
+![CloudSphere sign-in screen](screenshots/login.jpg)
 
 ## Features
 
@@ -71,16 +93,25 @@ flowchart LR
 ## Repository layout
 
 ```text
-frontend/             React application and styles
-backend/src/          API routes, authentication, configuration, database access
-backend/tests/        Database and API test suites
-database/migrations/ Schema, constraints, routines, triggers, privileges
-database/seeds/      Development demonstration data
-database/scripts/    Bootstrap, migration, and seed tools
-docs/                Schema notes and database demonstration guide
-api/                 Vercel API entry point
-vercel.json          Deployment build and routing configuration
+README.md
+database/schema.sql                 Fresh-install SQL snapshot
+database/sample_data.sql            Synthetic seed data
+database/queries.sql                Review queries and temporary CRUD demo
+database/TABLES_AND_COLUMNS.md       Database catalog
+database/migrations/                Authoritative incremental schema changes
+database/scripts/                   Bootstrap, migration and seed tools
+frontend/src/                       React application source
+backend/src/                        Express application source
+backend/tests/                      Automated application/database tests
+screenshots/                        Actual application evidence
+tests/                              Review results and test instructions
+report/DBMS_Project_Report.pdf       Technical report (+ editable DOCX)
+presentation/DBMS_Project_Presentation.pptx
+docs/                               Design notes and demonstration guide
 ```
+
+The guideline permits a similar folder structure. Application source remains in `frontend/src` and `backend/src` so existing build and deployment paths work. Node dependencies are pinned in each package lockfile; the environment instructions below replace a Python `requirements.txt`.
+
 
 ## Run locally
 
@@ -179,6 +210,16 @@ There are 27 application tables, plus migration tracking and monitoring partitio
 Primary and foreign keys enforce relationships. CHECK constraints validate states and resource limits. Allocation routines use transactions and row locks. Triggers enforce VM transitions and record state changes. Generated host columns calculate free capacity from total minus allocated resources. Monitoring history is partitioned by time.
 
 See [schema design](docs/phase1-schema-design.md) and the [database demo guide](docs/DATABASE_DEMO_GUIDE.md).
+
+### Sample data and SQL review
+
+The seed creates synthetic organizations, users, plans, regions, hosts, configurations and lifecycle examples. It uses allocation routines to maintain resource counters. Do not publish a dump of local credentials or private user records.
+
+Use the normal migration workflow above. Alternatively, on a **fresh bootstrapped database**, connect as `cloudsphere_migrator` and run `database/schema.sql`, then `database/sample_data.sql`. The snapshot records the same checksums as the migration runner. Do not apply the snapshot to an existing installation. If any statement fails in pgAdmin, run `ROLLBACK` before investigating.
+
+Open `database/queries.sql` in pgAdmin Query Tool on the `cloudsphere` database. Select one query and press F5. Expand **Schemas → public → Tables** to inspect columns and constraints, or right-click a table → **View/Edit Data → All Rows**. The temporary CRUD section requires the schema-owner connection and rolls back all changes.
+
+See [all tables and columns](database/TABLES_AND_COLUMNS.md), [core ER diagram](docs/CORE_ER_DIAGRAM.md), and [review test evidence](tests/README.md).
 
 ## Useful API routes
 

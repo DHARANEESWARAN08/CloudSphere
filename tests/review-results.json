@@ -1,0 +1,132 @@
+[
+  {
+    "name": "VM/project/configuration join",
+    "sql": "SELECT v.vm_id,v.name,p.name AS project,c.vcpu,c.ram_gb,v.state FROM virtual_machine v JOIN project p USING(project_id) JOIN vm_configuration c USING(vm_configuration_id) ORDER BY v.vm_id LIMIT 5",
+    "rows": [
+      {
+        "vm_id": "1",
+        "name": "web-1",
+        "project": "web-prod",
+        "vcpu": 4,
+        "ram_gb": 8,
+        "state": "RUNNING"
+      },
+      {
+        "vm_id": "2",
+        "name": "web-2",
+        "project": "web-prod",
+        "vcpu": 4,
+        "ram_gb": 8,
+        "state": "RUNNING"
+      },
+      {
+        "vm_id": "3",
+        "name": "web-win",
+        "project": "web-prod",
+        "vcpu": 2,
+        "ram_gb": 4,
+        "state": "RUNNING"
+      },
+      {
+        "vm_id": "4",
+        "name": "etl-batch",
+        "project": "analytics",
+        "vcpu": 4,
+        "ram_gb": 8,
+        "state": "STOPPED"
+      },
+      {
+        "vm_id": "5",
+        "name": "report-worker",
+        "project": "analytics",
+        "vcpu": 2,
+        "ram_gb": 4,
+        "state": "TERMINATED"
+      }
+    ]
+  },
+  {
+    "name": "VM counts by state",
+    "sql": "SELECT state,count(*)::int AS vm_count FROM virtual_machine GROUP BY state ORDER BY state",
+    "rows": [
+      {
+        "state": "RUNNING",
+        "vm_count": 13
+      },
+      {
+        "state": "STOPPED",
+        "vm_count": 3
+      },
+      {
+        "state": "TERMINATED",
+        "vm_count": 3
+      }
+    ]
+  },
+  {
+    "name": "Host capacity integrity",
+    "sql": "SELECT count(*)::int AS violations FROM cloud_host WHERE allocated_cpu<0 OR allocated_cpu>total_cpu OR allocated_ram_gb<0 OR allocated_ram_gb>total_ram_gb",
+    "rows": [
+      {
+        "violations": 0
+      }
+    ]
+  },
+  {
+    "name": "Request status integrity",
+    "sql": "SELECT count(*)::int AS violations FROM vm_request WHERE (status='PENDING' AND (vm_id IS NOT NULL OR reviewed_at IS NOT NULL)) OR (status='APPROVED' AND vm_id IS NULL)",
+    "rows": [
+      {
+        "violations": 0
+      }
+    ]
+  },
+  {
+    "name": "Projects without VMs",
+    "sql": "SELECT project_id,name FROM project p WHERE NOT EXISTS (SELECT 1 FROM virtual_machine v WHERE v.project_id=p.project_id)",
+    "rows": [
+      {
+        "project_id": "6",
+        "name": "data"
+      }
+    ]
+  },
+  {
+    "name": "INSERT",
+    "sql": "INSERT INTO review_crud_demo VALUES (1,'demo',2) RETURNING *",
+    "rows": [
+      {
+        "id": 1,
+        "name": "demo",
+        "vcpu": 2
+      }
+    ]
+  },
+  {
+    "name": "UPDATE",
+    "sql": "UPDATE review_crud_demo SET vcpu=4 WHERE id=1 RETURNING *",
+    "rows": [
+      {
+        "id": 1,
+        "name": "demo",
+        "vcpu": 4
+      }
+    ]
+  },
+  {
+    "name": "DELETE",
+    "sql": "DELETE FROM review_crud_demo WHERE id=1 RETURNING *",
+    "rows": [
+      {
+        "id": 1,
+        "name": "demo",
+        "vcpu": 4
+      }
+    ]
+  },
+  {
+    "name": "CHECK validation",
+    "expected": "23514",
+    "actual": "23514"
+  }
+]

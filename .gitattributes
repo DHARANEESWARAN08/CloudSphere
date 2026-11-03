@@ -1,0 +1,4 @@
+# Migration checksums must remain identical across Windows and Unix checkouts.
+database/migrations/*.sql text eol=lf
+database/schema.sql text eol=lf
+database/sample_data.sql text eol=lf
