@@ -6,6 +6,28 @@ CloudSphere lets customers organize projects, request virtual machines, and trac
 
 > Academic simulation: VM records represent simulated infrastructure. The application does not boot real virtual machines or process real payments.
 
+## Screenshots
+
+Captured from the running local application using a demonstration account. Resource counts and dates reflect the demo database at capture time.
+
+### Workspace overview
+
+View VM status, allocated resources, estimated spend, and quota utilization.
+
+![CloudSphere customer workspace showing resource summaries, quotas, and recent virtual machines](docs/images/workspace-overview.jpg)
+
+### Request a virtual machine
+
+Choose a project, CPU, RAM, storage, operating system, and region before requesting administrator approval.
+
+![CloudSphere VM request form with configuration fields and cost estimate panel](docs/images/vm-request.jpg)
+
+### Sign in
+
+Customer and administrator accounts use the same sign-in screen and enter their respective consoles.
+
+![CloudSphere sign-in screen](docs/images/login.jpg)
+
 ## Features
 
 - Customer and administrator sign-in with separate consoles.
