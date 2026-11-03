@@ -18,7 +18,7 @@ CloudSphere lets customers organize projects, request virtual machines, and trac
 | Rohith V S | 25BCE5776 |
 | Raakesh M | 25BCE1991 |
 
-[YouTube demonstration](https://youtu.be/pPAymDPT_og) · [Technical report](report/DBMS_Project_Report.pdf) · [Presentation](presentation/DBMS_Project_Presentation.pptx)
+[YouTube demonstration](https://youtu.be/pPAymDPT_og) · [Technical report](report/DBMS_Project_Report.pdf) · [Presentation previews and download](presentation/README.md)
 
 ### Problem statement
 
